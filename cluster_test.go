@@ -6,14 +6,24 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"encoding/gob"
 )
 
-const numMsgs = 5000
+const numMsgs = 1000
 
 type Stats struct {
 	server      Server
 	numMsgsRcvd int
 	err         error
+}
+
+type MyMsg struct {
+	MyMsgId int64
+	Str     string
+}
+
+func init() {
+	gob.Register(MyMsg{})
 }
 
 func (stats *Stats) check(t *testing.T, numServers int) {
@@ -35,29 +45,51 @@ func prepServer(id int) (stats *Stats, err error) {
 }
 
 
-func TestBroadcast(t *testing.T) {
+func TestBegin(t *testing.T) {
+	New(100, Config{
+		Peers: []PeerConfig{
+			{Id: 100, Address: "localhost:7070"},
+			{Id: 200, Address: "localhost:8080"},
+			{Id: 300, Address: "localhost:9090"},
+		},
+	})
+}
+
+func prepCluster() (clusterStats []*Stats, err error) {
 	stats, err := prepServer(1)
 	if err != nil {
-		t.Error(err)
-		return
+		return nil, err
 	}
 	numServers := len(stats.server.Peers()) + 1
-	numExpectedMsgs := numMsgs * (numServers-1)
+
 	clusterstats := make ([]*Stats, numServers)
 	clusterstats[0] = stats
-	if err != nil {
-		t.Error(err) 
-		return
-	}
 	// get num peers
 	for i := 1; i < numServers; i++ {
-		stats, err := prepServer(i+1)
-		if err != nil {
-			t.Error(err)
-			return
+		stats, er := prepServer(i+1)
+		if er != nil {
+			return nil, er
 		}
 		clusterstats[i] = stats
 	}
+	return clusterstats, nil
+}
+
+func closeCluster(clusterStats []*Stats) {
+	for _, stats := range clusterStats {
+		stats.server.Close()
+	}
+}
+
+func TestBroadcast(t *testing.T) {
+	clusterStats, err := prepCluster()
+	numServers := len(clusterStats)
+	numExpectedMsgs := numMsgs * (numServers-1)
+	if err != nil {
+		t.Error(err)
+	}
+	defer closeCluster(clusterStats)
+
 	var wg sync.WaitGroup
 	drainer := func(stats *Stats) {
 		defer wg.Done()
@@ -74,9 +106,10 @@ func TestBroadcast(t *testing.T) {
 					stats.err = errors.New("Rcvd msg from self")
 					return
 				}
-				expectedMsg := fmt.Sprintf("Msg:%d", env.MsgId)
-				if env.Msg != expectedMsg {
-					stats.err = errors.New(fmt.Sprintf("Expected msg:'%s', got: '%s'", expectedMsg, env.Msg))
+				expectedMsgStr := fmt.Sprintf("Msg:%d", env.MsgId)
+				m := env.Msg.(MyMsg)
+				if m.Str != expectedMsgStr {
+					stats.err = errors.New(fmt.Sprintf("Expected msg:'%s', got: '%s'", expectedMsgStr, m.Str));
 					return
 				}
 				if stats.numMsgsRcvd == numExpectedMsgs {
@@ -92,7 +125,8 @@ func TestBroadcast(t *testing.T) {
 	pumper := func(stats *Stats) {
 		defer wg.Done()
 		for i := 1; i <= numMsgs; i++ {
-			env := &Envelope{Pid: BROADCAST, MsgId: int64(i), Msg: fmt.Sprintf("Msg:%d", i)}
+			msg := &MyMsg{MyMsgId : int64(i), Str:  fmt.Sprintf("Msg:%d", i)}
+			env := &Envelope{Pid: BROADCAST, MsgId: int64(i), Msg: msg}
 			stats.server.Outbox() <- env
 			if i%10 == 0 {
 			      time.Sleep(1 * time.Millisecond)
@@ -101,14 +135,16 @@ func TestBroadcast(t *testing.T) {
 	}
 	wg.Add(numServers * 2)
 	for i := 0; i < numServers; i++ {
-		go drainer(clusterstats[i])
+		go drainer(clusterStats[i])
 	}
 	time.Sleep(1 * time.Second)
 	for i := 0; i < numServers; i++ {
-		go pumper(clusterstats[i])
+		go pumper(clusterStats[i])
 	}
 	wg.Wait()
 	for i := 0; i < numServers; i++ {
-		clusterstats[i].check(t, numServers)
+		clusterStats[i].check(t, numServers)
 	}
 }
+
+

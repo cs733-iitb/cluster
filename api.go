@@ -28,4 +28,7 @@ type Server interface {
 	// the channel to receive messages from other peers.
 	Inbox() chan *Envelope
 
+	Close()
+
+	IsClosed() bool
 }

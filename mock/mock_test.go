@@ -2,7 +2,7 @@ package mock
 
 import (
 	_ "fmt"
-	"github.com/sriram-srinivasan/cluster"
+	. "github.com/cs733-iitb/cluster"
 	"sync"
 	"testing"
 	"time"
@@ -17,14 +17,11 @@ type MockMsg struct {
 
 // create servers with pids from 1..NUMSERVERS inclusive
 func mkCluster() (*MockCluster, error) {
-	cl := NewCluster()
-	for i := 1; i <= NUMSERVERS; i++ {
-		err := cl.AddServer(i)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return cl, nil
+	config := Config{Peers:[]PeerConfig{
+		{Id:1}, {Id:2}, {Id:3}, {Id:4}, {Id:5},
+	}}
+	cl, err := NewCluster(config)
+	return cl, err 
 }
 
 func broadcastRcv(cl *MockCluster, numSenders int, numMsgs int, waitForMs int, dropProbability float32, maxDelayMs int) (numUnique, numRcvd int) {
@@ -47,7 +44,7 @@ func broadcastRcv(cl *MockCluster, numSenders int, numMsgs int, waitForMs int, d
 		defer wg.Done()
 		for i := 0; i < numMsgs; i++ {
 			msgid := int64(i)<<NUMSERVERS | int64(senderPid)
-			cl.Servers[senderPid].Outbox() <- &cluster.Envelope{Pid: cluster.BROADCAST, MsgId: msgid, Msg: "hello"}
+			cl.Servers[senderPid].Outbox() <- &Envelope{Pid: BROADCAST, MsgId: msgid, Msg: "hello"}
 			if i%100 == 0 {
 				time.Sleep(1 * time.Millisecond)
 			}
@@ -85,11 +82,11 @@ func broadcastRcv(cl *MockCluster, numSenders int, numMsgs int, waitForMs int, d
 
 func TestCreate(t *testing.T) {
 	cl, err := mkCluster()
-	defer cl.Shutdown()
+	defer cl.Close()
 	if err != nil {
 		t.Error(err)
 	}
-	defer cl.Shutdown()
+	defer cl.Close()
 
 	// ensure that each server knows about the other.
 	for i := 1; i < NUMSERVERS; i++ {
@@ -120,7 +117,7 @@ func TestCreate(t *testing.T) {
 // Broadcast from server 0, expect to receive on all others
 func TestNoloss(t *testing.T) {
 	cl, _ := mkCluster()
-	defer cl.Shutdown()
+	defer cl.Close()
 
 	nSenders := 1
 	nMsgs := 100
@@ -138,7 +135,7 @@ func TestNoloss(t *testing.T) {
 
 func TestSendOmission(t *testing.T) {
 	cl, _ := mkCluster()
-	defer cl.Shutdown()
+	defer cl.Close()
 
 	var dropProb float32 = 0.30
 
@@ -160,7 +157,7 @@ func TestSendOmission(t *testing.T) {
 
 func TestOutOfOrder(t *testing.T) {
 	cl, _ := mkCluster()
-	defer cl.Shutdown()
+	defer cl.Close()
 
 	nSenders := 1
 	nMsgs := 100
@@ -176,7 +173,7 @@ func TestOutOfOrder(t *testing.T) {
 
 func TestPartition(t *testing.T) {
 	cl, _ := mkCluster()
-	defer cl.Shutdown()
+	defer cl.Close()
 
 	nMsgs := 100
 

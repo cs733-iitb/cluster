@@ -1,4 +1,3 @@
-
 // package cluster provides facilities for unicast and broadcast messaging between members of a cluster.
 // It uses zeromq (in particular, github.com/pebbe/zmq4) to deal with connection establishment and reestablishment
 // Each server creates a zeromq PULL socket for its own address, and a PUSH socket for all.
@@ -9,8 +8,8 @@
 //              {"Id":200,  "Address":"localhost:8002"}
 //              {"Id":300,  "Address":"localhost:8003"}
 //         ],
-//       InboxSize: 1000,
-//       OutboxSize: 1000
+//       "InboxSize": 1000,
+//       "OutboxSize": 1000
 //     }
 // 
 // Example:
@@ -29,15 +28,18 @@
 package cluster
 
 import (
+	"syscall"
+	"time"
 	"bytes"
 	"encoding/gob"
 	"encoding/json"
 	"fmt"
-	"github.com/golang/glog"
 	zmq "github.com/pebbe/zmq4"
+	"log"
 	"os"
 	"strings"
 	"sync"
+	"errors"
 )
 
 const (
@@ -45,11 +47,12 @@ const (
 )
 
 type Peer struct {
-	mutex   sync.Mutex
+	sync.Mutex
 	Id      int
 	Address string
 	sock    *zmq.Socket
 	connected bool
+	closed bool
 }
 
 type serverImpl struct { // implements Server interface
@@ -70,38 +73,39 @@ type Config struct {
 	OutboxSize int
 }
 
-var QUIT *Envelope
-
 func init() {
 	fmt.Print() // to avoid having to comment out "import fmt"
-	QUIT = &Envelope{Pid: -1, Msg: "'MockCluster_QUIT'"}
 }
 
-func New(myid int, configFile string) (server Server, err error) {
-	var f *os.File
-	if f, err = os.Open(configFile); err != nil {
-		return
+// config can be the name of a json formatted file or a Config structure.
+// A sample configuration looks like this:
+// { "InboxSize": 100,
+//   "Peers":[
+//     {"Id":1,"Address":"localhost:8001"},
+//     {"Id":2,"Address":"localhost:8002"},
+//     {"Id":3,"Address":"localhost:8003"},
+//     {"Id":4,"Address":"localhost:8004"},
+//     {"Id":5,"Address":"localhost:8005"}
+//   ]
+// }
+
+func New(myid int, configuration interface{}) (server Server, err error) {
+	var config *Config
+	if config, err = ToConfig(configuration); err != nil {
+		return nil, err
 	}
-	defer f.Close()
-	dec := json.NewDecoder(f)
-	var config Config
-	if err = dec.Decode(&config); err != nil {
-		return
-	}
-/*
 	if config.InboxSize == 0 {
-		config.InboxSize = 100
+		config.InboxSize = 10
 	}
 	if config.OutboxSize == 0 {
-		config.OutboxSize = 100
+		config.OutboxSize = 10
 	}
-*/
 	srvr := new(serverImpl)
 	server = srvr
 	srvr.inbox = make(chan *Envelope, config.InboxSize)
 	srvr.outbox = make(chan *Envelope, config.OutboxSize)
 	srvr.peers = []*Peer{}
-	err = srvr.initEndPoints(myid, &config)
+	err = srvr.initEndPoints(myid, config)
 	return srvr, err
 }
 
@@ -117,6 +121,22 @@ func (server *serverImpl) Peers() []int {
 func (server *serverImpl) Inbox() chan *Envelope  { return server.inbox }
 func (server *serverImpl) Outbox() chan *Envelope { return server.outbox }
 
+func (server *serverImpl) IsClosed() bool {
+	server.Lock()
+	defer server.Unlock()
+	return server.closed
+}
+
+func (server *serverImpl) Close() {
+	server.Lock()
+	server.closed = true // server.recvForever is polling this flag
+	close(server.outbox) // to make server.sendForever quit
+	for _, peer := range server.peers {
+		peer.Close()
+	}
+	server.Unlock()
+}
+
 func (server *serverImpl) initEndPoints(myid int, config *Config) (err error) {
 	foundMyId := false
 	for _, srv := range config.Peers {
@@ -128,52 +148,58 @@ func (server *serverImpl) initEndPoints(myid int, config *Config) (err error) {
 			server.sock = sock
 			err = sock.Bind("tcp://*:" + port)
 			if err != nil {
-				glog.Fatalf("Unable to bind a zmq socket to %s. Error=%v\n", srv.Address, err)
+				log.Fatalf("Unable to bind a zmq socket to %s. Error=%v\n", srv.Address, err)
 			}
-			glog.Info("Listening at port " + port)
+			//log.Print("Listening at port " + port)
 		} else {
 			var peer Peer
 			peer.Id = srv.Id
 			peer.Address = srv.Address
 			sock, err := zmq.NewSocket(zmq.PUSH)
 			if err != nil {
-				glog.Fatalln("Unable to create zmq socket\n")
+				log.Fatalln("Unable to create zmq socket\n")
 			}
 			peer.sock = sock
 			//err = sock.Connect("tcp://" + srv.Address)
 			//if err != nil {
-//				glog.Fatalf("Error connecting to %s. Error=%v\n", srv.Address, err)
-//			}
+			//				log.Fatalf("Error connecting to %s. Error=%v\n", srv.Address, err)
+			//			}
 			server.peers = append(server.peers, &peer)
 		}
 	}
 	if !foundMyId {
-		glog.Fatalf("Expected this server's id (\"%d\") to be present in the configuration", myid)
+		log.Fatalf("Expected this server's id (\"%d\") to be present in the configuration", myid)
 	}
 	go server.recvForever()
 	go server.sendForever()
 	return
 }
 
+var EAGAIN = zmq.AsErrno(syscall.EAGAIN)
 func (server *serverImpl) recvForever() {
 	var recvSock *zmq.Socket
 	recvSock = server.sock
-
+	recvSock.SetRcvtimeo(1 * time.Second)
 	for {
 		packet, err := recvSock.RecvBytes(0) // no need to thread-protect this socket. No one else is using it
+		if server.IsClosed() {
+			return
+		}
+		
 		if err == nil {
 			buf := bytes.NewBuffer(packet)
 			dec := gob.NewDecoder(buf)
 			envelope := new(Envelope)
 			err := dec.Decode(envelope)
 			if err != nil {
-				glog.Errorf("Error in decoding message: %v\n", err)
+				log.Fatalf("Error in decoding message: %v\n", err)
 			} else {
-				server.Inbox() <- envelope
+				server.inbox <- envelope
 			}
 		} else {
-			//glog.V(2).Infof("Error receiving packet : %v\n", err)
-			glog.Errorf("Error receiving packet : %v\n", err)
+			if err != EAGAIN { // something other than a rcv timeout
+				log.Fatalf("Error receiving packet : %v\n", err)
+			}
 		}
 	}
 }
@@ -186,14 +212,17 @@ func (envelope *Envelope) toBytes() (pkt []byte) {
 	if err == nil {
 		pkt = buffer.Bytes()
 	} else {
-		glog.Errorf("Error encoding envelope: %+v\n", envelope)
+		log.Fatalf("Error encoding envelope: %+v\n%+v", err, envelope)
 	}
 	return pkt
 }
 
 func (server *serverImpl) sendForever() {
 	for {
-		envelope := <-server.outbox
+		envelope, ok := <-server.outbox
+		if !ok {
+			return
+		}
 		toPid := envelope.Pid
 		envelope.Pid = server.Id
 		pkt := envelope.toBytes() // convert to bytes
@@ -209,13 +238,24 @@ func (server *serverImpl) sendForever() {
 	}
 }
 
+func (peer *Peer) Close() {
+	defer func() {recover()}() // eat any panics
+	peer.Lock()
+	defer peer.Unlock()
+	p := peer
+	if (p.connected) {
+		p.connected = false
+		p.sock.Close()
+	}
+}
+
 func (peer *Peer) sendPacket(pkt []byte) { // raw bytes interface, in
 	if pkt == nil {
 		return
 	}
 
-	peer.mutex.Lock()
-	defer peer.mutex.Unlock()
+	peer.Lock()
+	defer peer.Unlock()
 	p := peer
 	if (! p.connected) {
 		p.sock.Connect("tcp://" + p.Address)
@@ -224,7 +264,26 @@ func (peer *Peer) sendPacket(pkt []byte) { // raw bytes interface, in
 	}
 	n, err := peer.sock.SendBytes(pkt, zmq.DONTWAIT)
 	if err != nil || n == 0 {
-		//glog.V(2).Infof("Error sending packet: %v", err)
-		glog.Errorf("Error sending packet: %v", err)
+		log.Fatalf("Error sending packet: %v", err)
 	}
+}
+
+func ToConfig(configuration interface{}) (config *Config, err error){
+	var cfg Config
+	var ok bool
+	var configFile string
+	if configFile, ok = configuration.(string); ok {
+		var f *os.File
+		if f, err = os.Open(configFile); err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		dec := json.NewDecoder(f)
+		if err = dec.Decode(&cfg); err != nil {
+			return nil, err
+		}
+	} else if cfg, ok = configuration.(Config); !ok {
+		return nil, errors.New("Expected a configuration.json file or a Config structure")
+	}
+	return &cfg, nil
 }

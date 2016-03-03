@@ -1,7 +1,11 @@
 package main
 
+// In one terminal, run go run srv.go 1
+// In another terminal, run go run srv.go 2
+// Type in one termainal, see output in the other.
+
 import (
-	"github.com/sriram-srinivasan/cluster"
+	"github.com/cs733-iitb/cluster"
 	"flag"
 	"fmt"
 	"os"
@@ -9,6 +13,7 @@ import (
 	"strings"
 	"strconv"
 )
+
 func main() {
 	flag.Parse()
 	myid, _ := strconv.Atoi(flag.Args()[0])

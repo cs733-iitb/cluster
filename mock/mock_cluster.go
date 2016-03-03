@@ -3,12 +3,17 @@ package mock
 import (
 	"errors"
 	"fmt"
-	. "github.com/sriram-srinivasan/cluster"
+	. "github.com/cs733-iitb/cluster"
 	"math/rand"
 	"sync"
 	"time"
 )
 
+var QUIT *Envelope
+
+func init() {
+	QUIT = &Envelope{} // Special marker to use in Close()
+}
 type MockCluster struct {
 	sync.Mutex
 	Servers map[int]*MockServer
@@ -41,20 +46,35 @@ type MockServer struct {
 
 	// server-server messaging
 	clusterbox chan *Envelope
+
+	closed bool
 }
 
-
-func NewCluster() *MockCluster {
-	return &MockCluster{Servers: make(map[int]*MockServer)}
+// NewCluster accepts the same configuration as cluster.New. All it needs are the Ids
+// of the Peers, not the addresses. Alternatively, a nil configuration can be supplied
+// AddServer() called instead.
+// 
+func NewCluster(config interface{}) (*MockCluster, error) {
+	cl := MockCluster{Servers: make(map[int]*MockServer)}
+	if config != nil {
+		cfg, err := ToConfig(config)
+		if err != nil {
+			return nil, err
+		}
+		for _, peer := range cfg.Peers {
+			cl.AddServer(peer.Id)
+		}
+	}
+	return &cl, nil
 }
 
-func (mc *MockCluster) AddServer(pid int) error {
+func (mc *MockCluster) AddServer(pid int) (Server, error) {
 	mc.Lock()
 	defer mc.Unlock()
 
 	if _, ok := mc.Servers[pid]; ok {
 		// duplicates not allowed
-		return errors.New("Duplicate pid")
+		return nil, errors.New("Duplicate pid")
 	}
 
 	ms := newMockServer(pid)
@@ -64,7 +84,7 @@ func (mc *MockCluster) AddServer(pid int) error {
 		ms.AddPeer(srv)
 	}
 	mc.Servers[ms.pid] = ms
-	return nil
+	return ms, nil
 }
 
 // Convenience function to invoke a function on all configured servers.
@@ -76,8 +96,8 @@ func (mc *MockCluster) ForAll(do func(*MockServer)) {
 	mc.Unlock()
 }
 
-func (mc *MockCluster) Shutdown() {
-	mc.ForAll(func(srv *MockServer) { srv.Shutdown() })
+func (mc *MockCluster) Close() {
+	mc.ForAll(func(srv *MockServer) { srv.Close() })
 }
 
 // Group servers by partition. Those not mentioned explicitly are lumped together in a default partition
@@ -199,10 +219,21 @@ func (ms *MockServer) Partition(peerPids []int) {
 	ms.Unlock()
 }
 
-func (ms *MockServer) Shutdown() {
-	ms.inbox <- QUIT
+func (ms *MockServer) Close() {
+	ms.Lock()
+	defer ms.Unlock()
+	if ms.closed {
+		return
+	}
+	ms.closed = true
 	ms.outbox <- QUIT
 	ms.clusterbox <- QUIT
+}
+
+func (ms *MockServer) IsClosed() bool {
+	ms.Lock()
+	defer ms.Unlock()
+	return ms.closed
 }
 
 func (ms *MockServer) sendForever() {
@@ -211,6 +242,8 @@ func (ms *MockServer) sendForever() {
 		if e == QUIT {
 			return 
 		}
+		//fmt.Printf("SENDING @%d %+v\n", ms.pid, e.Msg)
+		
 		ms.Lock()
 		peers := ms.peers
 		ms.Unlock()
@@ -237,9 +270,13 @@ func (ms *MockServer) send(env *Envelope) {
 	drop := rand.Float32() <= dontSendProb
 
 	if peerAvail && !drop {
+		// Change 'to' address to 'from' address so that the recipient can reply using the same envelope
+		env.Pid = ms.pid
 		if delay > 0 {
 			time.AfterFunc((time.Duration(rand.Intn(delay)) * time.Millisecond),
-				func() { peer.clusterbox <- env })
+				func() { 
+					peer.clusterbox <- env 
+				})
 		} else {
 			peer.clusterbox <- env
 		}
@@ -250,7 +287,8 @@ func (ms *MockServer) send(env *Envelope) {
 // receive from cluster
 func (ms *MockServer) receiveForever() {
 	for {
-		msg := <-ms.clusterbox
+		msg := <- ms.clusterbox
+		//fmt.Printf("RECEIVED @%d: %+v\n",  ms.pid, msg.Msg)
 		if msg == QUIT {
 			return
 		}
