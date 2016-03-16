@@ -148,3 +148,25 @@ func TestBroadcast(t *testing.T) {
 }
 
 
+func sendRcv(t *testing.T) {
+	clusterStats, err := prepCluster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeCluster(clusterStats)
+
+	msg := &MyMsg{MyMsgId : 1, Str:  "sendRcv"}
+	env := &Envelope{Pid: clusterStats[1].server.Pid(), Msg: msg}
+	clusterStats[0].server.Outbox() <- env
+	select {
+	case <- clusterStats[1].server.Inbox(): return
+	case <- time.After(500 * time.Millisecond):
+		t.Fatal("Message not delivered")
+	}
+}
+
+
+func TestCloseAndRestart(t *testing.T) {
+	sendRcv(t)
+	sendRcv(t)
+}

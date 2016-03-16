@@ -62,8 +62,8 @@ Separately, there is support for mock network testing that simulates network par
 
 # Installation and Dependencies.
 
-    go get cs733-iit/cs733/cluster
-    go test -race cs733-iit/cs733/cluster 
+    go get github.com/cs733-iit/cluster
+    go test -race github.com/cs733-iit/cluster 
 
 This library depends on the excellent zeromq package and the lovely zmq4 golang bindings. Thank you, Martin Sustrik,  Pieter Hintjens and Peter Kleiweg.
 

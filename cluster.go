@@ -131,10 +131,8 @@ func (server *serverImpl) Close() {
 	server.Lock()
 	server.closed = true // server.recvForever is polling this flag
 	close(server.outbox) // to make server.sendForever quit
-	for _, peer := range server.peers {
-		peer.Close()
-	}
 	server.Unlock()
+	time.Sleep(600 * time.Millisecond) // so that send/rcv timeouts kick in
 }
 
 func (server *serverImpl) initEndPoints(myid int, config *Config) (err error) {
@@ -144,48 +142,45 @@ func (server *serverImpl) initEndPoints(myid int, config *Config) (err error) {
 			foundMyId = true
 			server.Id = myid
 			port := strings.SplitAfter(srv.Address, ":")[1]
-			sock, err := zmq.NewSocket(zmq.PULL)
-			server.sock = sock
-			err = sock.Bind("tcp://*:" + port)
-			if err != nil {
-				log.Fatalf("Unable to bind a zmq socket to %s. Error=%v\n", srv.Address, err)
-			}
-			//log.Print("Listening at port " + port)
+			go server.recvForever(port)
 		} else {
 			var peer Peer
 			peer.Id = srv.Id
 			peer.Address = srv.Address
-			sock, err := zmq.NewSocket(zmq.PUSH)
-			if err != nil {
-				log.Fatalln("Unable to create zmq socket\n")
-			}
-			peer.sock = sock
-			//err = sock.Connect("tcp://" + srv.Address)
-			//if err != nil {
-			//				log.Fatalf("Error connecting to %s. Error=%v\n", srv.Address, err)
-			//			}
 			server.peers = append(server.peers, &peer)
 		}
 	}
 	if !foundMyId {
 		log.Fatalf("Expected this server's id (\"%d\") to be present in the configuration", myid)
 	}
-	go server.recvForever()
 	go server.sendForever()
 	return
 }
 
 var EAGAIN = zmq.AsErrno(syscall.EAGAIN)
-func (server *serverImpl) recvForever() {
+func (server *serverImpl) recvForever(port string) {
 	var recvSock *zmq.Socket
-	recvSock = server.sock
-	recvSock.SetRcvtimeo(1 * time.Second)
+	recvSock, err := zmq.NewSocket(zmq.PULL)
+	if err == nil {
+		err = recvSock.Bind("tcp://*:" + port)
+		if err != nil {
+			println("BIND ERRRRRRRRRRRRRRRR")
+			log.Fatalf("Unable to bind a zmq socket to %s. Error=%v\n", port, err)
+		}
+	}
+
+	defer func() {
+		recvSock.Close()
+	}()
+	
+	// Timeout every so often to check server.isClosed()
+ 	recvSock.SetRcvtimeo(500 * time.Millisecond)
 	for {
-		packet, err := recvSock.RecvBytes(0) // no need to thread-protect this socket. No one else is using it
 		if server.IsClosed() {
-			return
+			break
 		}
 		
+		packet, err := recvSock.RecvBytes(0) // no need to thread-protect this socket. No one else is using it
 		if err == nil {
 			buf := bytes.NewBuffer(packet)
 			dec := gob.NewDecoder(buf)
@@ -198,7 +193,8 @@ func (server *serverImpl) recvForever() {
 			}
 		} else {
 			if err != EAGAIN { // something other than a rcv timeout
-				log.Fatalf("Error receiving packet : %v\n", err)
+				log.Printf("Error receiving packet : %v\n", err)
+				break
 			}
 		}
 	}
@@ -218,11 +214,38 @@ func (envelope *Envelope) toBytes() (pkt []byte) {
 }
 
 func (server *serverImpl) sendForever() {
-	for {
-		envelope, ok := <-server.outbox
-		if !ok {
-			return
+	// No mutexes used for peers or sockets because this is the only
+	// routine that accesses them.
+	for _, peer := range server.peers {
+		sock, err := zmq.NewSocket(zmq.PUSH)
+		if err != nil {
+			log.Fatalln("Unable to create zmq socket\n")
 		}
+		peer.sock = sock
+		err = sock.Connect("tcp://" + peer.Address)
+		//sock.SetSndtimeo(500 * time.Millisecond)
+		if err != nil {
+			log.Fatalf("Error connecting to %s. Error=%v\n", peer.Address, err)
+		}
+	}
+
+LOOP:
+	for {
+		var envelope *Envelope
+		var ok bool
+		select {
+		case envelope, ok = <-server.outbox:
+			if !ok {
+				break LOOP
+			}
+		case <- time.After(500 * time.Millisecond):
+			if server.IsClosed() {
+				break LOOP
+			} else {
+				continue LOOP
+			}
+		}
+
 		toPid := envelope.Pid
 		envelope.Pid = server.Id
 		pkt := envelope.toBytes() // convert to bytes
@@ -236,19 +259,32 @@ func (server *serverImpl) sendForever() {
 			}
 		}
 	}
+	for _, peer := range server.peers {
+		peer.sock.Close()
+		peer.connected = false
+	}
 }
-
+/*
 func (peer *Peer) Close() {
 	defer func() {recover()}() // eat any panics
 	peer.Lock()
-	defer peer.Unlock()
 	p := peer
-	if (p.connected) {
+	sock := p.sock
+	if p.connected {
 		p.connected = false
-		p.sock.Close()
+		p.sock = nil
+	}
+	peer.Unlock()
+	if sock != nil {
+		//ctx, _ := sock.Context()
+		sock.SetLinger(0) // Drop unsent msgs on Close. Don't linger.
+		sock.Close()
+		if ctx != nil {
+			ctx.Term()
+		}
 	}
 }
-
+*/
 func (peer *Peer) sendPacket(pkt []byte) { // raw bytes interface, in
 	if pkt == nil {
 		return
@@ -264,7 +300,7 @@ func (peer *Peer) sendPacket(pkt []byte) { // raw bytes interface, in
 	}
 	n, err := peer.sock.SendBytes(pkt, zmq.DONTWAIT)
 	if err != nil || n == 0 {
-		log.Fatalf("Error sending packet: %v", err)
+		log.Printf("Error sending packet: %v", err)
 	}
 }
 
