@@ -167,7 +167,7 @@ func (server *serverImpl) recvForever(port string) {
 			log.Fatalf("Unable to bind a zmq socket to %s. Error=%v\n", port, err)
 		}
 	}
-	sock.SetLinger(0)
+	recvSock.SetLinger(0)
 	defer func() {
 		recvSock.Close()
 	}()
