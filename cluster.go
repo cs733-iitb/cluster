@@ -164,11 +164,10 @@ func (server *serverImpl) recvForever(port string) {
 	if err == nil {
 		err = recvSock.Bind("tcp://*:" + port)
 		if err != nil {
-			println("BIND ERRRRRRRRRRRRRRRR")
 			log.Fatalf("Unable to bind a zmq socket to %s. Error=%v\n", port, err)
 		}
 	}
-
+	sock.SetLinger(0)
 	defer func() {
 		recvSock.Close()
 	}()
@@ -227,6 +226,7 @@ func (server *serverImpl) sendForever() {
 		if err != nil {
 			log.Fatalf("Error connecting to %s. Error=%v\n", peer.Address, err)
 		}
+		sock.SetLinger(0)
 	}
 
 LOOP:
@@ -264,27 +264,7 @@ LOOP:
 		peer.connected = false
 	}
 }
-/*
-func (peer *Peer) Close() {
-	defer func() {recover()}() // eat any panics
-	peer.Lock()
-	p := peer
-	sock := p.sock
-	if p.connected {
-		p.connected = false
-		p.sock = nil
-	}
-	peer.Unlock()
-	if sock != nil {
-		//ctx, _ := sock.Context()
-		sock.SetLinger(0) // Drop unsent msgs on Close. Don't linger.
-		sock.Close()
-		if ctx != nil {
-			ctx.Term()
-		}
-	}
-}
-*/
+
 func (peer *Peer) sendPacket(pkt []byte) { // raw bytes interface, in
 	if pkt == nil {
 		return
