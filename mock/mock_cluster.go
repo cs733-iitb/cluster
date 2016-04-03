@@ -22,7 +22,11 @@ type MockCluster struct {
 type MockServer struct {
 	sync.Mutex
 
+	// peer id
 	pid int
+
+	// Cluster the server belongs to
+	mc *MockCluster
 
 	// peers in current partition
 	peers map[int]*MockServer
@@ -77,7 +81,7 @@ func (mc *MockCluster) AddServer(pid int) (Server, error) {
 		return nil, errors.New("Duplicate pid")
 	}
 
-	ms := newMockServer(pid)
+	ms := mc.newMockServer(pid)
 	for _, srv := range mc.Servers {
 		// mutual introductions
 		srv.AddPeer(ms)
@@ -86,6 +90,30 @@ func (mc *MockCluster) AddServer(pid int) (Server, error) {
 	mc.Servers[ms.pid] = ms
 	return ms, nil
 }
+
+
+func (mc *MockCluster) newMockServer(pid int) *MockServer {
+	var ms MockServer
+	ms.mc = mc // The cluster it belongs to
+	ms.pid = pid
+	ms.peers = make(map[int]*MockServer)
+	ms.allpeers = make(map[int]*MockServer)
+	ms.inbox = make(chan *Envelope, 100)
+	ms.outbox = make(chan *Envelope, 100)
+	ms.clusterbox = make(chan *Envelope, 100)
+	go ms.receiveForever()
+	go ms.sendForever()
+	return &ms
+}
+
+// removeServer is not public. Call Server.Close() to remove
+// it from the cluster.
+func (mc *MockCluster) removeServer(pid int) {
+	mc.Lock()
+	defer mc.Unlock()
+	delete(mc.Servers, pid)
+}
+
 
 // Convenience function to invoke a function on all configured servers.
 func (mc *MockCluster) ForAll(do func(*MockServer)) {
@@ -97,7 +125,8 @@ func (mc *MockCluster) ForAll(do func(*MockServer)) {
 }
 
 func (mc *MockCluster) Close() {
-	mc.ForAll(func(srv *MockServer) { srv.Close() })
+	mc.ForAll(func(srv *MockServer) { srv.doClose(/*cluster close=*/true) })
+	mc.Servers = make(map[int]*MockServer)
 }
 
 // Group servers by partition. Those not mentioned explicitly are lumped together in a default partition
@@ -175,18 +204,10 @@ func (ms *MockServer) Inbox() chan *Envelope {
 	return ms.inbox
 }
 
-func newMockServer(pid int) *MockServer {
-	var ms MockServer
-	ms.pid = pid
-	ms.peers = make(map[int]*MockServer)
-	ms.allpeers = make(map[int]*MockServer)
-	ms.inbox = make(chan *Envelope, 100)
-	ms.outbox = make(chan *Envelope, 100)
-	ms.clusterbox = make(chan *Envelope, 100)
-	go ms.receiveForever()
-	go ms.sendForever()
-	return &ms
+func (ms *MockServer) Cluster() *MockCluster {
+	return ms.mc
 }
+
 
 func (ms *MockServer) AddPeer(peer *MockServer) {
 	ms.Lock()
@@ -221,13 +242,20 @@ func (ms *MockServer) Partition(peerPids []int) {
 
 func (ms *MockServer) Close() {
 	ms.Lock()
-	defer ms.Unlock()
+	ms.doClose(/*single server close */ false)
+	ms.Unlock()
+}
+
+func (ms *MockServer) doClose(clusterClose bool) {
 	if ms.closed {
 		return
 	}
 	ms.closed = true
 	ms.outbox <- QUIT
 	ms.clusterbox <- QUIT
+	if (! clusterClose) {
+		ms.mc.removeServer(ms.pid)
+	}
 }
 
 func (ms *MockServer) IsClosed() bool {

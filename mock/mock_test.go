@@ -199,3 +199,14 @@ func TestPartition(t *testing.T) {
 	}
 
 }
+
+func TestShutdownAndRestart(t *testing.T) {
+	cl, _ := mkCluster()
+	defer cl.Close()
+
+	cl.Servers[1].Close()
+	_, err := cl.AddServer(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
